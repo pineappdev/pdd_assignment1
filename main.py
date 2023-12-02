@@ -1,8 +1,11 @@
 from typing import Tuple
 
+import pyspark
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import explode, col, collect_list
+from pyspark.sql.functions import col
 import argparse
+
+from pyspark.sql.types import StructType, StructField, LongType
 
 
 def parseargs() -> Tuple[str, str, str]:
@@ -30,33 +33,42 @@ def parseargs() -> Tuple[str, str, str]:
 # Same as above?
 
 # Function to update paths
-def update_paths(paths_df, edges_dataframe):
-    paths_df \
-        .join(edges_dataframe, paths_df.edge_2 == edges_dataframe.edge_1) \
+def update_paths(paths_df, edges_dataframe) -> pyspark.sql.DataFrame:
+    paths_df = paths_df.alias('df1')
+    edges_dataframe = edges_dataframe.alias('df2')
+    # TODO: join returns only new paths, we'd also like to keep the existing ones...
+    new_paths = paths_df \
+        .join(edges_dataframe, col('df1.edge_2') == col('df2.edge_1')) \
         .select(
-        col("edge_1"),
-        col("edge_2"),
-        (col("length") + col("weight")).alias("new_length")
-    ) \
-        .groupBy("edge_1", "edge_2").min("new_length").alias("weight")
+           col("df1.edge_1").alias('edge_1'),
+            col("df2.edge_2").alias('edge_2'),
+            (col("df1.length") + col("df2.length")).alias("length")
+        )
 
-    # We're not doing the anti-join here
-    return paths_df
+    return paths_df.union(new_paths).groupBy(
+        "edge_1", "edge_2"
+    ).agg(pyspark.sql.functions.min("length").alias("length"))
 
 
 # TODO: can the length be negative? What if we have a negative-length cycle?
 # TODO: cache initial paths df!
 # TODO: checkpoint updated_paths_df before checking the changes?
 def join_edges(edges_df, max_iter=999999):
-    edges_df.cache()
-    initial_paths_df = edges_df.selectExpr("edge_1 as edge_1", "edge_2 as edge_2", "length as weight")
+    edges_df = edges_df.cache()
+    initial_paths_df = edges_df.selectExpr("edge_1 as edge_1", "edge_2 as edge_2", "length")
     for i in range(max_iter):
         # Update paths
         updated_paths_df = update_paths(initial_paths_df, edges_df)
         # Check if there are any changes in paths
-        changes_df = initial_paths_df.join(updated_paths_df, on="node", how="left_anti")
+        # We need to find paths that are either in right but not in left or are in right but with a different value, meaning
+        # We need to find any row from df2 that does not exist in df1
+
+        # TODO: there must be a better version to do this - after all, we don't have to execute the whole exceptAll,
+        # we can just stop at the first difference encountered
+        is_not_changed = updated_paths_df.selectExpr("edge_1 as edge_1", "edge_2 as edge_2", "length") \
+            .exceptAll(initial_paths_df).isEmpty()
         # If no changes, break the loop
-        if changes_df.count() == 0:
+        if is_not_changed:
             break
 
         # Update the paths for the next iteration
@@ -66,14 +78,14 @@ def join_edges(edges_df, max_iter=999999):
 
 # TODO: cache? checkpoint? Unpersist?
 def join_paths(edges_df, max_iter=999999):
-    initial_paths_df = edges_df.selectExpr("edge_1 as edge_1", "edge_2 as edge_2", "length as weight")
+    initial_paths_df = edges_df.selectExpr("edge_1 as edge_1", "edge_2 as edge_2", "length")
     for i in range(max_iter):
         # Update paths
         updated_paths_df = update_paths(initial_paths_df, initial_paths_df)
         # Check if there are any changes in paths
-        changes_df = initial_paths_df.join(updated_paths_df, on="node", how="left_anti")
-        # If no changes, break the loop
-        if changes_df.count() == 0:
+        is_not_changed = updated_paths_df.selectExpr("edge_1 as edge_1", "edge_2 as edge_2", "length") \
+            .exceptAll(initial_paths_df).isEmpty()
+        if is_not_changed:
             break
 
         # Update the paths for the next iteration
@@ -81,6 +93,34 @@ def join_paths(edges_df, max_iter=999999):
     return initial_paths_df
 
 
+def get_paths(algorithm_version: str, edges_df, output_path: str):
+    if algorithm_version == 'linear':
+        outcome = join_edges(edges_df)
+    elif algorithm_version == 'doubling':
+        outcome = join_paths(edges_df)
+    else:
+        raise Exception("provided algorithm_version {} is invalid! Choose from linear or doubling"
+                        .format(algorithm_version)
+                        )
+
+    outcome.show()
+    outcome.write.csv(output_path)
+
+
 if __name__ == '__main__':
+    algorithm_version, input_path, output_path = parseargs()
     # Initialize Spark session
-    spark = SparkSession.builder.appName("ShortestPaths").getOrCreate()
+    spark = SparkSession.builder \
+        .master("local[*]") \
+        .config("spark.executor.memory", "4g") \
+        .config("spark.driver.memory", "1g") \
+        .appName("mlibs") \
+        .getOrCreate()
+
+    edges_df = spark.read.csv(input_path, schema=StructType([
+        StructField("edge_1", LongType(), True),
+        StructField("edge_2", LongType(), True),
+        StructField("length", LongType(), True)
+    ]), header=True)
+
+    get_paths(algorithm_version, edges_df, output_path)
