@@ -37,7 +37,8 @@ def update_paths(paths_df, edges_dataframe) -> pyspark.sql.DataFrame:
     paths_df = paths_df.alias('df1')
     edges_dataframe = edges_dataframe.alias('df2')
     new_paths = paths_df \
-        .join(edges_dataframe, col('df1.edge_2') == col('df2.edge_1'), col('df1.edge_1') != col('df2.edge_2')) \
+        .join(edges_dataframe, [col('df1.edge_2') == col('df2.edge_1'),
+                                col('df1.edge_1') != col('df2.edge_2')]) \
         .select(
             col("df1.edge_1").alias('edge_1'),
             col("df2.edge_2").alias('edge_2'),
