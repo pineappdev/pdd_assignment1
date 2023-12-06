@@ -68,10 +68,12 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
     paths_df: pyspark.sql.DataFrame = edges_df.selectExpr("edge_1 as paths_edge_1",
                                                           "edge_2 as paths_edge_2",
                                                           "length as paths_length").repartition(12)
+
     best_paths_df = edges_df.selectExpr("edge_1 as best_edge_1",
                                         "edge_2 as best_edge_2",
                                         "length as best_length").repartition(12)
-    edges_df = edges_df.cache()
+
+    edges_df = edges_df.cache() # TODO: we actually might not want to cache the entire df in memory...
     for i in range(max_iter):
         # TODO: which checkpoint to choose?
         # best_paths_df.checkpoint()
@@ -244,21 +246,21 @@ def get_paths(algorithm_version: str, edges_df, output_path: str):
 if __name__ == '__main__':
     algorithm_version, input_path, output_path = parseargs()
     # Initialize Spark session
-    spark = SparkSession.builder \
-        .master("local[*]") \
-        .config("spark.executor.memory", "4g") \
-        .config("spark.driver.memory", "3g") \
-        .appName("mlibs") \
-        .getOrCreate()
-
     # spark = SparkSession.builder \
-    #     .master("spark://master:7077") \
-    #     .config("spark.executor.memory", "2g") \
+    #     .master("local[*]") \
+    #     .config("spark.executor.memory", "4g") \
     #     .config("spark.driver.memory", "3g") \
     #     .appName("mlibs") \
     #     .getOrCreate()
 
-    # spark.sparkContext.setCheckpointDir("checkpointDir")
+    spark = SparkSession.builder \
+        .master("spark://master:7077") \
+        .config("spark.executor.memory", "2g") \
+        .config("spark.driver.memory", "3g") \
+        .appName("mlibs") \
+        .getOrCreate()
+
+    spark.sparkContext.setCheckpointDir("checkpointDir")
 
     # TODO: setting this to -1 shouldn't help since it's 10MB by default
     # spark.sql.autoBroadcastJoinThreshold
