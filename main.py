@@ -48,7 +48,6 @@ def update_paths(paths_df, edges_dataframe) -> pyspark.sql.DataFrame:
         ).agg(pyspark.sql.functions.min("length").alias("length"))
 
 
-# 12 mins and it's stuck on iteration 17
 def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
     paths_df: pyspark.sql.DataFrame = edges_df.selectExpr("edge_1 as paths_edge_1",
                                                           "edge_2 as paths_edge_2",
@@ -61,7 +60,7 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
     edges_df = edges_df.cache()
     for i in range(max_iter):
         # TODO: when to call unpersist?
-        print("Iteration {}, num partitions paths_df: {}".format(i, paths_df.rdd.getNumPartitions()))
+        print("Iteration {}".format(i, paths_df.rdd.getNumPartitions()))
 
         paths_df = paths_df \
             .join(edges_df, on=[col('paths_edge_2') == col('edge_1'),
@@ -79,9 +78,6 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
         if paths_df.isEmpty():
             break
 
-        #paths_df = paths_df.checkpoint()
-        # paths_df = paths_df.localCheckpoint()
-
         best_paths_df = best_paths_df.join(paths_df, on=[
             col("paths_edge_1") == col("best_edge_1"),
             col("paths_edge_2") == col("best_edge_2")
@@ -90,6 +86,8 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
             "CASE WHEN best_edge_2 IS NOT NULL then best_edge_2 ELSE paths_edge_2 END AS best_edge_2",
             "CASE WHEN paths_edge_1 IS NOT NULL then paths_length ELSE best_length END AS best_length"
         ).repartition(12).checkpoint()
+
+        print("Best paths size: {}, paths df size: {}".format(best_paths_df.count(), paths_df.count()))
 
     return best_paths_df
 
@@ -107,7 +105,7 @@ def join_edges_2(edges_df, max_iter=999999):
             solution_df.alias('df2'),
             on=[col('df1.edge_1') == col('df2.edge_1'), col('df1.edge_2') == col('df2.edge_2')],
             how='outer'
-        )
+        ) # TODO: cache here?
 
         new_paths = paths_df \
             .where('df1.length IS NOT NULL AND (df2.length IS NULL OR df1.length < df2.length)') \
@@ -124,9 +122,8 @@ def join_edges_2(edges_df, max_iter=999999):
                         "COALESCE(df1.edge_2, df2.edge_2) as edge_2",
                         "least(df1.length, df2.length) as length")  # TODO: least? Will it really work?
 
-        solution_df = solution_df.localCheckpoint()#.checkpoint()
-
-        paths_df = new_paths.localCheckpoint()#.checkpoint()
+        solution_df = solution_df.checkpoint()
+        paths_df = new_paths.localCheckpoint()
 
     return solution_df
 
@@ -139,30 +136,60 @@ def join_edges_2(edges_df, max_iter=999999):
 # Well
 #
 
+# TODO: can we have multi-graphs in the input?
+
 # TODO: make sure we do not join the same paths over and over again...
 # we do not have to join the entire paths dataframe with itself every time
 def join_paths(edges_df, max_iter=999999):
-    best_paths_df = edges_df.repartition(12).alias("best")
+    best_paths_df: pyspark.sql.DataFrame = edges_df.repartition(12)
+    paths_df = edges_df.repartition(12)
     for i in range(max_iter):
         print("Iteration {}".format(i))
-        # Update paths
-        updated_paths_df = update_paths(best_paths_df, best_paths_df)
         # Check if there are any changes in paths
-        improved_paths = updated_paths_df.alias("updated").join(
+        paths_df = update_paths(paths_df, best_paths_df).alias("paths").join(
             best_paths_df.alias("best"),
             [
-                col("best.edge_1") == col("updated.edge_1"),
-                col("best.edge_2") == col("updated.edge_2"),
-                col("best.length").isNull() | (col("updated.length") < col("best.length"))
+                col("best.edge_1") == col("paths.edge_1"),
+                col("best.edge_2") == col("paths.edge_2")
             ],
             how="left"
-        )
-        is_not_changed = improved_paths.isEmpty() # TODO: will isEmpty() work if the join is left join?
+        ).where(
+            col("best.length").isNull() | (col("paths.length") < col("best.length"))
+        ).selectExpr("paths.edge_1 as edge_1", "paths.edge_2 as edge_2", "paths.length as length").cache()
+
+        # print("Paths df count: {}, paths df distinct count: {}".format(
+        #     paths_df.count(), paths_df.selectExpr("edge_1", "edge_2").distinct().count()
+        # ))
+
+        is_not_changed = paths_df.isEmpty()
         if is_not_changed:
             break
 
-        # Update the paths for the next iteration
-        best_paths_df = updated_paths_df.repartition(12).checkpoint()
+        # print("best_paths_df df count: {}, best_paths_df distinct count: {}".format(
+        #     best_paths_df.count(), best_paths_df.selectExpr("edge_1", "edge_2").distinct().count()
+        # ))
+
+        # Update the best paths for the next iteration
+        # Paths contain no duplicates
+        # Best paths contain no duplicates too
+        # Why outer join produces duplicates ????????
+        best_paths_df = best_paths_df.alias("best").join(paths_df.alias("paths"), on=[
+            col("best.edge_1") == col("paths.edge_1"),
+            col("best.edge_2") == col("paths.edge_2")
+        ], how="outer").selectExpr(
+            "CASE WHEN best.edge_1 IS NOT NULL then best.edge_1 ELSE paths.edge_1 END AS edge_1",
+            "CASE WHEN best.edge_2 IS NOT NULL then best.edge_2 ELSE paths.edge_2 END AS edge_2",
+            "CASE WHEN paths.edge_1 IS NOT NULL then paths.length ELSE best.length END AS length"
+        ).groupBy("edge_1", "edge_2").agg(pyspark.sql.functions.min("length").alias("length"))\
+            .repartition(12).checkpoint()
+
+        # print("best_paths_df df count: {}, best_paths_df distinct count: {}".format(
+        #     best_paths_df.count(), best_paths_df.selectExpr("edge_1", "edge_2").distinct().count()
+        # ))
+
+        print("Paths size: {}, best size: {}".format(paths_df.count(), best_paths_df.count()))
+
+        paths_df = paths_df.repartition(12).checkpoint() # We still have to do checkpoint after cache() because cache doesn't break the lineage
     return best_paths_df
 
 
@@ -201,13 +228,14 @@ if __name__ == '__main__':
         .getOrCreate()
 
     spark.sparkContext.setCheckpointDir("hdfs://master:9000/checkpointDir")
-    #spark.sparkContext.setConf("spark.sql.shuffle.partitions", 12)
 
     edges_df = spark.read.csv(input_path, schema=StructType([
         StructField("edge_1", IntegerType(), True),
         StructField("edge_2", IntegerType(), True),
         StructField("length", DoubleType(), True)
-    ]), header=True)
+    ]), header=True).groupBy("edge_1", "edge_2")\
+        .agg(pyspark.sql.functions.min("length").alias("length")
+    )
 
     import datetime
 
