@@ -87,8 +87,6 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
             "CASE WHEN paths_edge_1 IS NOT NULL then paths_length ELSE best_length END AS best_length"
         ).repartition(12).checkpoint()
 
-        print("Best paths size: {}, paths df size: {}".format(best_paths_df.count(), paths_df.count()))
-
     return best_paths_df
 
 
@@ -155,24 +153,18 @@ def join_paths(edges_df, max_iter=999999):
             how="left"
         ).where(
             col("best.length").isNull() | (col("paths.length") < col("best.length"))
-        ).selectExpr("paths.edge_1 as edge_1", "paths.edge_2 as edge_2", "paths.length as length").cache()
-
-        # print("Paths df count: {}, paths df distinct count: {}".format(
-        #     paths_df.count(), paths_df.selectExpr("edge_1", "edge_2").distinct().count()
-        # ))
+        ).selectExpr("paths.edge_1 as edge_1", "paths.edge_2 as edge_2", "paths.length as length")\
+            .checkpoint()
 
         is_not_changed = paths_df.isEmpty()
         if is_not_changed:
             break
 
-        # print("best_paths_df df count: {}, best_paths_df distinct count: {}".format(
-        #     best_paths_df.count(), best_paths_df.selectExpr("edge_1", "edge_2").distinct().count()
-        # ))
-
         # Update the best paths for the next iteration
         # Paths contain no duplicates
         # Best paths contain no duplicates too
         # Why outer join produces duplicates ????????
+        # Checkpoint above (instead of cache()) solves the problem
         best_paths_df = best_paths_df.alias("best").join(paths_df.alias("paths"), on=[
             col("best.edge_1") == col("paths.edge_1"),
             col("best.edge_2") == col("paths.edge_2")
@@ -180,12 +172,8 @@ def join_paths(edges_df, max_iter=999999):
             "CASE WHEN best.edge_1 IS NOT NULL then best.edge_1 ELSE paths.edge_1 END AS edge_1",
             "CASE WHEN best.edge_2 IS NOT NULL then best.edge_2 ELSE paths.edge_2 END AS edge_2",
             "CASE WHEN paths.edge_1 IS NOT NULL then paths.length ELSE best.length END AS length"
-        ).groupBy("edge_1", "edge_2").agg(pyspark.sql.functions.min("length").alias("length"))\
-            .repartition(12).checkpoint()
-
-        # print("best_paths_df df count: {}, best_paths_df distinct count: {}".format(
-        #     best_paths_df.count(), best_paths_df.selectExpr("edge_1", "edge_2").distinct().count()
-        # ))
+        ).repartition(12).checkpoint()
+        #.groupBy("edge_1", "edge_2").agg(pyspark.sql.functions.min("length").alias("length"))\
 
         print("Paths size: {}, best size: {}".format(paths_df.count(), best_paths_df.count()))
 
