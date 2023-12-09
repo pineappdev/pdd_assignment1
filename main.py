@@ -4,8 +4,9 @@ import pyspark
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 import argparse
+import csv
 
-from pyspark.sql.types import StructType, StructField, LongType, DoubleType, IntegerType
+from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType
 
 
 def parseargs() -> Tuple[str, str, str]:
@@ -22,15 +23,6 @@ def parseargs() -> Tuple[str, str, str]:
     output_path = args.output_path
 
     return algorithm_version, input_path, output_path
-
-
-# 1st way - add a single edge at a time
-# After each join, we keep only the shortest paths (agg min)
-# We stop when there's no changes in the dataset?
-# How to efficiently detect changes?
-
-# 2nd way - join paths with themselves
-# Same as above?
 
 
 def update_paths(paths_df, edges_dataframe) -> pyspark.sql.DataFrame:
@@ -59,7 +51,6 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
 
     edges_df = edges_df.cache()
     for i in range(max_iter):
-        # TODO: when to call unpersist?
         print("Iteration {}".format(i, paths_df.rdd.getNumPartitions()))
 
         paths_df = paths_df \
@@ -103,7 +94,7 @@ def join_edges_2(edges_df, max_iter=999999):
             solution_df.alias('df2'),
             on=[col('df1.edge_1') == col('df2.edge_1'), col('df1.edge_2') == col('df2.edge_2')],
             how='outer'
-        ) # TODO: cache here?
+        )  # TODO: cache here?
 
         new_paths = paths_df \
             .where('df1.length IS NOT NULL AND (df2.length IS NULL OR df1.length < df2.length)') \
@@ -126,18 +117,8 @@ def join_edges_2(edges_df, max_iter=999999):
     return solution_df
 
 
-# TODO: cache? checkpoint? Unpersist?
-# We can't do the similar approach for avoiding creating the same paths as in the edges, because
-# Updating a path from X to Y means we have to join that path now with all the paths from previous version of our path dataset
-# We can't just add it to only paths we updated in the step before
-# So how do we avoid adding the same paths over and over again?
-# Well
-#
-
+# TODO: Unpersist? Cache?
 # TODO: can we have multi-graphs in the input?
-
-# TODO: make sure we do not join the same paths over and over again...
-# we do not have to join the entire paths dataframe with itself every time
 def join_paths(edges_df, max_iter=999999):
     best_paths_df: pyspark.sql.DataFrame = edges_df.repartition(12)
     paths_df = edges_df.repartition(12)
@@ -153,7 +134,7 @@ def join_paths(edges_df, max_iter=999999):
             how="left"
         ).where(
             col("best.length").isNull() | (col("paths.length") < col("best.length"))
-        ).selectExpr("paths.edge_1 as edge_1", "paths.edge_2 as edge_2", "paths.length as length")\
+        ).selectExpr("paths.edge_1 as edge_1", "paths.edge_2 as edge_2", "paths.length as length") \
             .checkpoint()
 
         is_not_changed = paths_df.isEmpty()
@@ -173,11 +154,12 @@ def join_paths(edges_df, max_iter=999999):
             "CASE WHEN best.edge_2 IS NOT NULL then best.edge_2 ELSE paths.edge_2 END AS edge_2",
             "CASE WHEN paths.edge_1 IS NOT NULL then paths.length ELSE best.length END AS length"
         ).repartition(12).checkpoint()
-        #.groupBy("edge_1", "edge_2").agg(pyspark.sql.functions.min("length").alias("length"))\
+        # .groupBy("edge_1", "edge_2").agg(pyspark.sql.functions.min("length").alias("length"))\
 
         print("Paths size: {}, best size: {}".format(paths_df.count(), best_paths_df.count()))
 
-        paths_df = paths_df.repartition(12).checkpoint() # We still have to do checkpoint after cache() because cache doesn't break the lineage
+        # We still have to do checkpoint after cache() because cache doesn't break the lineage
+        paths_df = paths_df.repartition(12).checkpoint()
     return best_paths_df
 
 
@@ -194,19 +176,22 @@ def get_paths(algorithm_version: str, edges_df, output_path: str):
     print("End time: {}".format(datetime.datetime.now()))
     print("Outcome size: {}".format(outcome.count()))
     outcome.show()
-    # TODO: change this to create a single cvs, not some weird folders
-    outcome.repartition(1).write.csv(output_path, header=True, mode='overwrite')
+    spark_to_csv(outcome, output_path)
+    # outcome.repartition(1).write.mode("overwrite").csv(output_path if output_path.startswith("file:///") else
+    #                                                    "file:///" + output_path, header=True)
+
+
+def spark_to_csv(df: pyspark.sql.DataFrame, file_path):
+    """ Converts spark dataframe to CSV file """
+    with open(file_path, "w+") as f:
+        writer = csv.DictWriter(f, fieldnames=df.columns)
+        writer.writerow(dict(zip(df.columns, df.columns)))
+        for row in df.toLocalIterator():
+            writer.writerow(row.asDict())
 
 
 if __name__ == '__main__':
     algorithm_version, input_path, output_path = parseargs()
-    # Initialize Spark session
-    # spark = SparkSession.builder \
-    #     .master("local[*]") \
-    #     .config("spark.executor.memory", "4g") \
-    #     .config("spark.driver.memory", "3g") \
-    #     .appName("mlibs") \
-    #     .getOrCreate()
 
     spark = SparkSession.builder \
         .master("spark://master:7077") \
@@ -221,9 +206,9 @@ if __name__ == '__main__':
         StructField("edge_1", IntegerType(), True),
         StructField("edge_2", IntegerType(), True),
         StructField("length", DoubleType(), True)
-    ]), header=True).groupBy("edge_1", "edge_2")\
+    ]), header=True).groupBy("edge_1", "edge_2") \
         .agg(pyspark.sql.functions.min("length").alias("length")
-    )
+             )
 
     import datetime
 
@@ -232,4 +217,3 @@ if __name__ == '__main__':
     get_paths(algorithm_version, edges_df, output_path)
 
     print("End time: {}".format(datetime.datetime.now()))
-
