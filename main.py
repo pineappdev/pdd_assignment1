@@ -124,6 +124,13 @@ def join_paths(edges_df, max_iter=999999):
     for i in range(max_iter):
         print("Iteration {}".format(i))
         # Check if there are any changes in paths
+        # What we could do here instead is use a temp variable
+        # dummy = paths_df
+        # to do dummy.unpersist() right after paths_df.checkpoint() is called
+        # To tell spark it can free the memory/disk reserved in the previous iteration step
+        # But since unpersist() is just a hint to spark
+        # Unless we operate on big dataframes, or do a lot of steps and encounter issues
+        # We can clean the checkpoint dir manually after the script ends
         paths_df = update_paths(paths_df, best_paths_df).alias("paths").join(
             best_paths_df.alias("best"),
             [
