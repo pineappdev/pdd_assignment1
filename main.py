@@ -1,12 +1,10 @@
 from typing import Tuple
 
 import pyspark
-from pyspark import SparkFiles
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 import argparse
 import csv
-import os
 
 from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType
 
@@ -104,14 +102,13 @@ def join_edges_2(edges_df, max_iter=999999):
                     col('df1.edge_2').alias('edge_2'),
                     col('df1.length').alias('length'))
 
-        # TODO: do we have to do checkpoints if we already have the 'isEmpty' condition here?
         if new_paths.isEmpty():
             break
 
         solution_df = paths_df \
             .selectExpr("COALESCE(df1.edge_1, df2.edge_1) as edge_1"
                         "COALESCE(df1.edge_2, df2.edge_2) as edge_2",
-                        "least(df1.length, df2.length) as length")  # TODO: least? Will it really work?
+                        "least(df1.length, df2.length) as length")
 
         solution_df = solution_df.checkpoint()
         paths_df = new_paths.localCheckpoint()
@@ -119,7 +116,7 @@ def join_edges_2(edges_df, max_iter=999999):
     return solution_df
 
 
-# TODO: Unpersist? Cache?
+# TODO: Unpersist?
 # TODO: can we have multi-graphs in the input?
 def join_paths(edges_df, max_iter=999999):
     best_paths_df: pyspark.sql.DataFrame = edges_df.repartition(12)
