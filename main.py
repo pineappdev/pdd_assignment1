@@ -1,10 +1,12 @@
 from typing import Tuple
 
 import pyspark
+from pyspark import SparkFiles
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 import argparse
 import csv
+import os
 
 from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType
 
@@ -78,7 +80,7 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
             "CASE WHEN paths_edge_1 IS NOT NULL then paths_length ELSE best_length END AS best_length"
         ).repartition(12).checkpoint()
 
-    return best_paths_df
+    return best_paths_df.selectExpr("best_edge_1 as edge_1", "best_edge_2 as edge_2", "best_length as length")
 
 
 def join_edges_2(edges_df, max_iter=999999):
@@ -107,7 +109,7 @@ def join_edges_2(edges_df, max_iter=999999):
             break
 
         solution_df = paths_df \
-            .selectExpr("COALESCE(df1.edge_1, df2.edge_1) as edge_1",
+            .selectExpr("COALESCE(df1.edge_1, df2.edge_1) as edge_1"
                         "COALESCE(df1.edge_2, df2.edge_2) as edge_2",
                         "least(df1.length, df2.length) as length")  # TODO: least? Will it really work?
 
@@ -201,6 +203,10 @@ if __name__ == '__main__':
         .getOrCreate()
 
     spark.sparkContext.setCheckpointDir("hdfs://master:9000/checkpointDir")
+
+    #spark.sparkContext.addFile(input_path)
+    #print(spark.sparkContext.listFiles)
+    #print(SparkFiles.get(os.path.basename(input_path)))
 
     edges_df = spark.read.csv(input_path, schema=StructType([
         StructField("edge_1", IntegerType(), True),
