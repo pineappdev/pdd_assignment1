@@ -111,7 +111,7 @@ def join_edges_2(edges_df, max_iter=999999):
                         "least(df1.length, df2.length) as length")
 
         solution_df = solution_df.checkpoint()
-        paths_df = new_paths.localCheckpoint()
+        paths_df = new_paths.checkpoint()
 
     return solution_df
 
@@ -141,7 +141,7 @@ def join_paths(edges_df, max_iter=999999):
         ).where(
             col("best.length").isNull() | (col("paths.length") < col("best.length"))
         ).selectExpr("paths.edge_1 as edge_1", "paths.edge_2 as edge_2", "paths.length as length") \
-            .checkpoint()
+            .repartition(12).checkpoint()
 
         is_not_changed = paths_df.isEmpty()
         if is_not_changed:
@@ -163,9 +163,6 @@ def join_paths(edges_df, max_iter=999999):
         # .groupBy("edge_1", "edge_2").agg(pyspark.sql.functions.min("length").alias("length"))\
 
         print("Paths size: {}, best size: {}".format(paths_df.count(), best_paths_df.count()))
-
-        # We still have to do checkpoint after cache() because cache doesn't break the lineage
-        paths_df = paths_df.repartition(12).checkpoint()
     return best_paths_df
 
 
