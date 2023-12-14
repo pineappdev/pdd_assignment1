@@ -133,7 +133,6 @@ def get_paths(algorithm_version: str, edges_df, output_path: str):
                         )
 
     print("End time: {}".format(datetime.datetime.now()))
-    print("Outcome size: {}".format(outcome.count()))
     spark_to_csv(outcome, output_path)
 
 
@@ -155,6 +154,7 @@ if __name__ == '__main__':
     spark = SparkSession.builder \
         .master("local[*]") \
         .appName("mlibs") \
+        .config("spark.hadoop.home.dir", "/dummy/dummy/dummy/dummy/hadoop/home") \
         .getOrCreate()
 
     spark.sparkContext.setCheckpointDir("checkpoints")
