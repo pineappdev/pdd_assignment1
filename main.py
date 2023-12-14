@@ -3,10 +3,10 @@ from typing import Tuple
 import pyspark
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
+from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType
 import argparse
 import csv
-
-from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType
+import datetime
 
 
 def parseargs() -> Tuple[str, str, str]:
@@ -51,7 +51,7 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
 
     edges_df = edges_df.cache()
     for i in range(max_iter):
-        print("Iteration {}".format(i, paths_df.rdd.getNumPartitions()))
+        print("Iteration {}".format(i))
 
         paths_df = paths_df \
             .join(edges_df, on=[col('paths_edge_2') == col('edge_1'),
@@ -81,43 +81,6 @@ def join_edges_simple(edges_df: pyspark.sql.DataFrame, max_iter=999999):
     return best_paths_df.selectExpr("best_edge_1 as edge_1", "best_edge_2 as edge_2", "best_length as length")
 
 
-def join_edges_2(edges_df, max_iter=999999):
-    edges_df = edges_df
-
-    solution_df = edges_df.repartition(12)
-    paths_df = edges_df.repartition(12)
-    edges_df = edges_df.repartition(12).cache()
-    for i in range(max_iter):
-        print("Iteration {}".format(i))
-        updated_paths_df = update_paths(paths_df, edges_df)
-        paths_df = updated_paths_df.alias('df1').join(
-            solution_df.alias('df2'),
-            on=[col('df1.edge_1') == col('df2.edge_1'), col('df1.edge_2') == col('df2.edge_2')],
-            how='outer'
-        )  # TODO: cache here?
-
-        new_paths = paths_df \
-            .where('df1.length IS NOT NULL AND (df2.length IS NULL OR df1.length < df2.length)') \
-            .select(col('df1.edge_1').alias('edge_1'),
-                    col('df1.edge_2').alias('edge_2'),
-                    col('df1.length').alias('length'))
-
-        if new_paths.isEmpty():
-            break
-
-        solution_df = paths_df \
-            .selectExpr("COALESCE(df1.edge_1, df2.edge_1) as edge_1"
-                        "COALESCE(df1.edge_2, df2.edge_2) as edge_2",
-                        "least(df1.length, df2.length) as length")
-
-        solution_df = solution_df.checkpoint()
-        paths_df = new_paths.checkpoint()
-
-    return solution_df
-
-
-# TODO: Unpersist?
-# TODO: can we have multi-graphs in the input?
 def join_paths(edges_df, max_iter=999999):
     best_paths_df: pyspark.sql.DataFrame = edges_df.repartition(12)
     paths_df = edges_df.repartition(12)
@@ -148,10 +111,6 @@ def join_paths(edges_df, max_iter=999999):
             break
 
         # Update the best paths for the next iteration
-        # Paths contain no duplicates
-        # Best paths contain no duplicates too
-        # Why outer join produces duplicates ????????
-        # Checkpoint above (instead of cache()) solves the problem
         best_paths_df = best_paths_df.alias("best").join(paths_df.alias("paths"), on=[
             col("best.edge_1") == col("paths.edge_1"),
             col("best.edge_2") == col("paths.edge_2")
@@ -160,9 +119,6 @@ def join_paths(edges_df, max_iter=999999):
             "CASE WHEN best.edge_2 IS NOT NULL then best.edge_2 ELSE paths.edge_2 END AS edge_2",
             "CASE WHEN paths.edge_1 IS NOT NULL then paths.length ELSE best.length END AS length"
         ).repartition(12).checkpoint()
-        # .groupBy("edge_1", "edge_2").agg(pyspark.sql.functions.min("length").alias("length"))\
-
-        print("Paths size: {}, best size: {}".format(paths_df.count(), best_paths_df.count()))
     return best_paths_df
 
 
@@ -178,10 +134,7 @@ def get_paths(algorithm_version: str, edges_df, output_path: str):
 
     print("End time: {}".format(datetime.datetime.now()))
     print("Outcome size: {}".format(outcome.count()))
-    outcome.show()
     spark_to_csv(outcome, output_path)
-    # outcome.repartition(1).write.mode("overwrite").csv(output_path if output_path.startswith("file:///") else
-    #                                                    "file:///" + output_path, header=True)
 
 
 def spark_to_csv(df: pyspark.sql.DataFrame, file_path):
@@ -196,18 +149,15 @@ def spark_to_csv(df: pyspark.sql.DataFrame, file_path):
 if __name__ == '__main__':
     algorithm_version, input_path, output_path = parseargs()
 
+    # .config("spark.executor.memory", "2g") \
+    # .config("spark.driver.memory", "3g") \
+
     spark = SparkSession.builder \
-        .master("spark://master:7077") \
-        .config("spark.executor.memory", "2g") \
-        .config("spark.driver.memory", "3g") \
+        .master("local[*]") \
         .appName("mlibs") \
         .getOrCreate()
 
-    spark.sparkContext.setCheckpointDir("hdfs://master:9000/checkpointDir")
-
-    #spark.sparkContext.addFile(input_path)
-    #print(spark.sparkContext.listFiles)
-    #print(SparkFiles.get(os.path.basename(input_path)))
+    spark.sparkContext.setCheckpointDir("checkpoints")
 
     edges_df = spark.read.csv(input_path, schema=StructType([
         StructField("edge_1", IntegerType(), True),
@@ -217,7 +167,6 @@ if __name__ == '__main__':
         .agg(pyspark.sql.functions.min("length").alias("length")
              )
 
-    import datetime
 
     print("Start time: {}".format(datetime.datetime.now()))
 
